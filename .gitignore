@@ -1,0 +1,18 @@
+# PGXS build artifacts
+*.o
+*.so
+*.bc
+*.dylib
+
+# pg_regress output
+regression.diffs
+regression.out
+results/
+tmp_check/
+log/
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
+
+# OS
+.DS_Store

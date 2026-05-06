@@ -1,0 +1,13 @@
+services:
+  pgsigchain:
+    build: .
+    environment:
+      POSTGRES_PASSWORD: pgsigchain
+      POSTGRES_DB: pgsigchain_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgsigchain_data:/var/lib/postgresql/data
+
+volumes:
+  pgsigchain_data:

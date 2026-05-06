@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Test on PG ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add PostgreSQL APT repository and install server + dev headers
+        # The official PGDG APT repo carries every supported major version
+        # (14, 15, 16, ...) on a single Ubuntu release, which is what lets the
+        # matrix install side-by-side without changing the runner image. We use
+        # the modern signed-by keyring layout because apt-key is deprecated.
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libssl-dev \
+            build-essential
+
+      - name: Put matrix pg_config on PATH
+        # Multiple postgres versions can coexist on the runner; PGXS picks the
+        # cluster matching whichever pg_config is found first on PATH, so we
+        # prepend the matrix version's bin directory.
+        run: echo "/usr/lib/postgresql/${{ matrix.pg }}/bin" >> $GITHUB_PATH
+
+      - name: Build extension
+        run: make
+
+      - name: Install extension into the matrix cluster
+        run: sudo make install
+
+      - name: Start PostgreSQL ${{ matrix.pg }} and create regression database
+        # Debian/Ubuntu auto-provisions a "main" cluster per installed major
+        # version; pg_ctlcluster is the supported way to start it. The
+        # `regression` database is what `make installcheck` connects to by
+        # default for PGXS extensions.
+        run: |
+          sudo pg_ctlcluster ${{ matrix.pg }} main start
+          sudo -u postgres createdb regression
+
+      - name: Run installcheck
+        # Run as the postgres OS user over the local Unix socket so peer auth
+        # succeeds without configuring passwords. -E preserves PG* env vars
+        # through sudo so the regression harness sees them.
+        run: PGUSER=postgres PGHOST=/var/run/postgresql sudo -E -u postgres make installcheck
+
+      - name: Show regression diffs on failure
+        if: failure()
+        run: cat regression.diffs || true

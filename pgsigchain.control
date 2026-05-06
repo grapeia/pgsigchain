@@ -1,0 +1,5 @@
+comment = 'Tamper-evident append-only audit log for PostgreSQL — signed hash chain'
+default_version = '0.3.0'
+relocatable = false
+schema = pgsigchain
+module_pathname = '$libdir/pgsigchain'
