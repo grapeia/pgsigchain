@@ -4,77 +4,35 @@
 >
 > Back to [README](README.md).
 
-Real-world operational questions and the SQL flow to answer them.
+Operational questions and the SQL flow to answer them — ordered roughly by user journey, from "I just protected a table" through advanced threat models and production monitoring.
 
-## "Was this record changed without going through the trigger?"
-
-Suspicion: someone ran `ALTER TABLE ... DISABLE TRIGGER`, modified the row, and re-enabled the trigger.
+## "Which tables are protected and in what state?"
 
 ```sql
-SELECT pgsigchain.protect('accounts');
--- ... normal operation for days/months ...
+-- Quick view:
+SELECT * FROM pgsigchain.status();
 
+-- Portable snapshot for anchoring the whole set:
+SELECT pgsigchain.export_manifest();
+```
+
+`status()` returns each protected table with `chain_length` and `block_count`. `export_manifest()` returns a JSONB with each table's last `chain_hash`, `block_hash`, and pubkey — useful for anchoring the **set** externally, which protects against meta-tampering on `pgsigchain.protected_tables`.
+
+## "Has anything been tampered with?"
+
+The basic question: did the data drift from what was originally recorded?
+
+```sql
 SELECT pgsigchain.verify_data('accounts');
--- t = every row still matches the INSERT hash
--- f = some row was tampered with behind the trigger
+-- t = every live row still matches its recorded hash
+-- f = something changed without going through the trigger
 ```
 
-`verify_data` reads each row from the live table, recomputes the hash with the same canonical encoding, and compares against the most recent `row_hash` in `chain_log`. It doesn't matter how the change came in — if it changed and the log wasn't updated, you get `f`.
+`verify_data` reads each row from the live table, recomputes the hash with the same canonical encoding, and compares against the most recent `row_hash` in `chain_log`. It doesn't matter how the change came in — `ALTER TABLE ... DISABLE TRIGGER`, direct `UPDATE` on system catalogs, anything — if it changed and the log wasn't updated, you get `f`.
 
-## "Who recorded this entry?"
+If it returns `f`, see the next section to investigate.
 
-```sql
-SELECT operation, created_at,
-       actor_user, actor_app, actor_addr, actor_pid
-  FROM pgsigchain.chain_log
- WHERE table_oid = 'accounts'::regclass
-   AND row_pk = pgsigchain.encode_pk('1234')
- ORDER BY id;
-```
-
-Every INSERT/UPDATE/DELETE carries `current_user`, `application_name`, client IP, and backend pid automatically.
-
-## "Did someone forge attribution (modify `actor_user` retroactively)?"
-
-```sql
--- Attacker with direct SQL does:
-UPDATE pgsigchain.chain_log SET actor_user = 'alice'
- WHERE id = 42;
-
--- You run:
-SELECT pgsigchain.verify_data('accounts');
--- f
-```
-
-The four actor fields go into `row_hash`. Tampering with any of them after the fact breaks verification.
-
-## "How do I prove to a third party that this record exists and never changed?"
-
-```sql
--- 1. Seal a block
-SELECT pgsigchain.finalize_block('accounts');  -- → block_number
-
--- 2. (once) register the public key so third parties know it
-SELECT pgsigchain.set_signing_key('accounts', '<pubkey hex>');
-
--- 3. Sign the entry with the privkey (privkey lives only in the call)
-SELECT pgsigchain.sign_chain_entry('accounts', <chain_log_id>, '<privkey hex>');
-
--- 4. Export the block and the Merkle proof of the record
-SELECT pgsigchain.export_block('accounts', 1);
-SELECT pgsigchain.merkle_proof('accounts', pgsigchain.encode_pk('1234'));
-
--- 5. Anchor the block to something immutable and store the ref
-SELECT pgsigchain.record_anchor(
-    'accounts', 1,
-    'opentimestamps', 'https://ots.example/proof/abc',
-    'commit of block 1'
-);
-```
-
-The third party verifies three things: (a) the Merkle proof matches the block's `merkle_root`, (b) the block is signed by the known pubkey, (c) the external anchor points to the same `block_hash`.
-
-## "I detected tampering — what now?"
+## "I detected tampering — what changed and who recorded the legitimate version?"
 
 `verify_data` tells you **whether** something changed. `find_tampered_rows` tells you **what**:
 
@@ -118,9 +76,73 @@ SELECT * FROM pgsigchain.audit_check('accounts');
 
 **What pgsigchain does NOT give you:** *the previous content* (only the hash), *who did the tampering* (the illicit change didn't go through the trigger), *the exact moment of tampering* (only "between my last anchor and now"). For those three you need backups/replicas + Postgres audit log + periodic monitoring.
 
-## "The whole chain was rewritten by a DBA — would I notice?"
+## "Who recorded this entry — and can the attribution be forged?"
 
-Worst case: a superuser has full access and rebuilds `pgsigchain.chain_log` from scratch.
+Every INSERT/UPDATE/DELETE on a protected table automatically captures `current_user`, `application_name`, client IP, and backend pid:
+
+```sql
+SELECT operation, created_at,
+       actor_user, actor_app, actor_addr, actor_pid
+  FROM pgsigchain.chain_log
+ WHERE table_oid = 'accounts'::regclass
+   AND row_pk = pgsigchain.encode_pk('1234')
+ ORDER BY id;
+```
+
+The four actor fields are part of `row_hash`, so rewriting them retroactively is detectable:
+
+```sql
+-- Attacker with direct SQL does:
+UPDATE pgsigchain.chain_log SET actor_user = 'alice'
+ WHERE id = 42;
+
+-- You run:
+SELECT pgsigchain.verify_data('accounts');
+-- f
+```
+
+Tampering with any actor field after the fact breaks verification.
+
+## "Will TRUNCATE be detected?"
+
+Yes — `TRUNCATE` is blocked outright on protected tables:
+
+```sql
+TRUNCATE accounts;
+-- ERROR: pgsigchain: TRUNCATE not allowed on protected table "accounts"
+```
+
+A `BEFORE TRUNCATE` trigger aborts the operation. Without it, `TRUNCATE` would slip past the per-row triggers and `verify_data` would misleadingly return `t` (zero rows = zero mismatches).
+
+## "How do I prove to a third party that this record exists and never changed?"
+
+```sql
+-- 1. Seal a block
+SELECT pgsigchain.finalize_block('accounts');  -- → block_number
+
+-- 2. (once) register the public key so third parties know it
+SELECT pgsigchain.set_signing_key('accounts', '<pubkey hex>');
+
+-- 3. Sign the entry with the privkey (privkey lives only in the call)
+SELECT pgsigchain.sign_chain_entry('accounts', <chain_log_id>, '<privkey hex>');
+
+-- 4. Export the block and the Merkle proof of the record
+SELECT pgsigchain.export_block('accounts', 1);
+SELECT pgsigchain.merkle_proof('accounts', pgsigchain.encode_pk('1234'));
+
+-- 5. Anchor the block to something immutable and store the ref
+SELECT pgsigchain.record_anchor(
+    'accounts', 1,
+    'opentimestamps', 'https://ots.example/proof/abc',
+    'commit of block 1'
+);
+```
+
+The third party verifies three things: (a) the Merkle proof matches the block's `merkle_root`, (b) the block is signed by the known pubkey, (c) the external anchor points to the same `block_hash`.
+
+## "Could the DBA rewrite the whole chain without me noticing?"
+
+Worst case: a superuser has full access and rebuilds `pgsigchain.chain_log` from scratch. Without external anchors, this is undetectable from inside the DB — the rewritten chain will be internally consistent.
 
 ```sql
 -- Beforehand (at a controlled checkpoint): anchor externally
@@ -141,18 +163,9 @@ SELECT * FROM pgsigchain.audit_check('accounts');
 --  verify_anchors  | f       (external anchor points to a different hash)
 ```
 
-Without external anchors, silent rewrites are undetectable inside the DB. With anchors, any tampering with the block invalidates the anchor — and since the anchor lives outside the database, the attacker can't change it.
+With an anchor recorded outside the DB before the rewrite, any tampering with the block invalidates the anchor — and since the anchor lives outside the database, the attacker can't change it.
 
-## "Did someone try to wipe everything with `TRUNCATE`?"
-
-```sql
-TRUNCATE accounts;
--- ERROR: pgsigchain: TRUNCATE not allowed on protected table "accounts"
-```
-
-A `BEFORE TRUNCATE` trigger aborts. Without it, TRUNCATE would slip past the per-row triggers and `verify_data` would misleadingly return `t` (zero rows = zero mismatches).
-
-## "There's a system writing data — how do I monitor it in production?"
+## "How do I monitor this in production?"
 
 pgsigchain is **pull-based**: nothing notifies on its own. Someone — cron, app, internal scheduler — has to call `verify_*` periodically. The helpers for this are:
 
@@ -243,15 +256,3 @@ There's no single rule — depends on volume and criticality. Common patterns:
 | `verify_anchor` | O(1) per anchor | Yes, trivial |
 
 Common strategy: `verify_chain` + `verify_blocks` + `verify_anchors` every minute; `verify_data` hourly or per anchor; `find_tampered_rows` only on demand once something has failed.
-
-## "Which tables are protected and in what state?"
-
-```sql
--- Quick view:
-SELECT * FROM pgsigchain.status();
-
--- Portable snapshot for anchoring the whole set:
-SELECT pgsigchain.export_manifest();
-```
-
-`export_manifest()` returns a JSONB with each protected table + last `chain_hash`, `block_hash`, and pubkey. Anchoring this JSON externally protects against meta-tampering on `pgsigchain.protected_tables`.
