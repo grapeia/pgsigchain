@@ -1,49 +1,51 @@
 # pgsigchain — PostgreSQL Ledger
 
-Extensão PostgreSQL que adiciona um **ledger tamper-evident append-only** a tabelas existentes. Cada INSERT é encadeado por hash (SHA-256), agrupado em blocos imutáveis, opcionalmente assinado (Ed25519) e ancorável externamente (S3 Object Lock, OpenTimestamps, etc.) — para que reescritas posteriores do log sejam detectáveis mesmo por quem desconfia do dono do banco.
+> **English** · [Português](README.pt-BR.md)
 
-Não é uma blockchain: não há descentralização, consenso ou trustlessness. É um log de auditoria com integridade criptográfica que pode ser commitado externamente.
+A PostgreSQL extension that adds a **tamper-evident append-only ledger** to existing tables. Every INSERT is hash-chained (SHA-256), grouped into immutable blocks, optionally signed (Ed25519), and externally anchorable (S3 Object Lock, OpenTimestamps, etc.) — so later rewrites of the log are detectable even by parties who don't trust the database owner.
 
-## O que pgsigchain não é
+This is not a blockchain: no decentralization, no consensus, no trustlessness. It's an audit log with cryptographic integrity that can be committed to external evidence.
 
-- Não substitui um sistema de auditoria distribuído (Merkle trees, Ethereum, etc.).
-- Não impede um superuser de desabilitar triggers e adulterar a chain — só torna isso *detectável* via `verify_chain` + `verify_data` + ancoragem externa.
-- Não protege a *ausência* de eventos — só pode logar o que passa pelos triggers.
-- Tempo absoluto (`created_at`) não é confiável — ordem é. Para "quando" confiável, depende dos anchors externos.
+## What pgsigchain is not
 
-## Requisitos
+- Not a replacement for distributed audit systems (Merkle trees over networks, Ethereum, etc.).
+- Doesn't prevent a superuser from disabling triggers and tampering with the chain — only makes that *detectable* via `verify_chain` + `verify_data` + external anchoring.
+- Doesn't protect against the *absence* of events — it can only log what passes through the triggers.
+- Absolute time (`created_at`) is not trustworthy — order is. For trustworthy "when", you depend on external anchors.
 
-- Docker e Docker Compose
+## Requirements
+
+- Docker and Docker Compose
 
 ## Quick Start
 
 ```bash
-# Build e start
+# Build and start
 docker compose up -d
 
-# Conectar
+# Connect
 psql -h localhost -p 5433 -U postgres -d pgsigchain_test
-# senha: pgsigchain
+# password: pgsigchain
 ```
 
-A extensao ja vem criada automaticamente no banco `pgsigchain_test`.
+The extension is created automatically in the `pgsigchain_test` database.
 
-## Build sem Docker
+## Build without Docker
 
 ```bash
-# Dependencias (Debian/Ubuntu)
+# Dependencies (Debian/Ubuntu)
 sudo apt install postgresql-server-dev-16 libssl-dev build-essential
 
-# Compilar e instalar
+# Compile and install
 make && sudo make install
 
-# No PostgreSQL
+# In PostgreSQL
 CREATE EXTENSION pgsigchain;
 ```
 
-## Uso
+## Usage
 
-### Proteger uma tabela
+### Protect a table
 
 ```sql
 CREATE TABLE ledger (
@@ -52,21 +54,21 @@ CREATE TABLE ledger (
     description TEXT
 );
 
--- Modo padrao: immutable, sem auto-finalizacao
+-- Default mode: immutable, no auto-finalization
 SELECT pgsigchain.protect('ledger');
 ```
 
-A tabela precisa ter uma **primary key**. Assinatura completa:
+The table must have a **primary key**. Full signature:
 
 ```sql
 pgsigchain.protect(table_name TEXT, mode TEXT DEFAULT 'immutable', auto_finalize INT DEFAULT NULL)
 ```
 
-- `mode = 'immutable'` (padrao) — bloqueia UPDATE/DELETE, registra so INSERT
-- `mode = 'audit'` — permite e registra INSERT/UPDATE/DELETE
-- `auto_finalize = N` — finaliza automaticamente um bloco a cada N entradas
+- `mode = 'immutable'` (default) — blocks UPDATE/DELETE, records only INSERT
+- `mode = 'audit'` — allows and records INSERT/UPDATE/DELETE
+- `auto_finalize = N` — automatically finalizes a block every N entries
 
-### Inserir dados
+### Insert data
 
 ```sql
 INSERT INTO ledger (amount, description) VALUES (100, 'deposit');
@@ -74,54 +76,54 @@ INSERT INTO ledger (amount, description) VALUES (-50, 'withdrawal');
 INSERT INTO ledger (amount, description) VALUES (200, 'bonus');
 ```
 
-Cada operacao gera uma entrada no `pgsigchain.chain_log` com:
+Each operation creates an entry in `pgsigchain.chain_log` with:
 
-| Campo | Descricao |
+| Field | Description |
 |---|---|
-| `row_pk` | encoding canonico length-prefixed da PK, hex (ver `encode_pk`) |
-| `row_hash` | SHA-256 das colunas com encoding canonico length-prefixed |
-| `prev_hash` | `chain_hash` da entrada anterior (ou `0` para a primeira) |
+| `row_pk` | length-prefixed canonical encoding of the PK, hex (see `encode_pk`) |
+| `row_hash` | SHA-256 of the columns with length-prefixed canonical encoding |
+| `prev_hash` | `chain_hash` of the previous entry (or `0` for the first) |
 | `chain_hash` | SHA-256(`prev_hash` \|\| `row_hash`) |
-| `operation` | `INSERT`, `UPDATE` ou `DELETE` |
-| `new_row_hash` | apenas em `UPDATE` (modo audit), hash do estado novo |
+| `operation` | `INSERT`, `UPDATE`, or `DELETE` |
+| `new_row_hash` | only for `UPDATE` (audit mode), hash of the new state |
 
-### Modos: immutable vs audit
+### Modes: immutable vs audit
 
 ```sql
--- Modo immutable (padrao)
+-- Immutable mode (default)
 SELECT pgsigchain.protect('ledger', 'immutable');
 UPDATE ledger SET amount = 999 WHERE id = 1;
 -- ERROR: pgsigchain: UPDATE not allowed on protected table "ledger"
 
--- Modo audit
+-- Audit mode
 CREATE TABLE events (id SERIAL PRIMARY KEY, payload JSONB);
 SELECT pgsigchain.protect('events', 'audit');
 
 INSERT INTO events (payload) VALUES ('{"type":"login"}');
 UPDATE events SET payload = '{"type":"login","ip":"1.2.3.4"}' WHERE id = 1;
 DELETE FROM events WHERE id = 1;
--- todas as operacoes aparecem em pgsigchain.chain_log com a coluna `operation`
+-- all operations show up in pgsigchain.chain_log with the `operation` column
 ```
 
-### Verificacao
+### Verification
 
 ```sql
--- Toda a chain (recalcula cada chain_hash)
+-- The whole chain (recomputes each chain_hash)
 SELECT pgsigchain.verify_chain('ledger');
 
--- Uma row especifica — usa row_pk codificado
+-- A specific row — uses encoded row_pk
 SELECT pgsigchain.verify_row('ledger', pgsigchain.encode_pk('1'));
 
--- Compara o estado atual da tabela contra o ultimo hash registrado
--- Detecta tampering que tenha contornado os triggers (ex.: superuser)
+-- Compares the current table state against the latest recorded hash
+-- Detects tampering that bypassed the triggers (e.g., superuser)
 SELECT pgsigchain.verify_data('ledger');
 ```
 
-`verify_data` recalcula o hash de cada row viva na tabela e compara com o `row_hash` mais recente em `chain_log`. Util para detectar `UPDATE` direto via `pg_class` ou writes que tenham desabilitado triggers.
+`verify_data` recomputes the hash of every live row in the table and compares it with the most recent `row_hash` in `chain_log`. Useful for detecting direct `UPDATE`s via `pg_class` or writes that disabled triggers.
 
 ### Merkle tree
 
-A Merkle tree e construida sobre as entradas de um bloco finalizado.
+The Merkle tree is built over the entries of a finalized block.
 
 ```sql
 SELECT pgsigchain.build_merkle('ledger');
@@ -129,23 +131,23 @@ SELECT pgsigchain.build_merkle('ledger');
 
 SELECT pgsigchain.merkle_root('ledger');
 
--- Proof de uma row (precisa do row_pk codificado)
+-- Proof for a row (needs the encoded row_pk)
 SELECT pgsigchain.merkle_proof('ledger', pgsigchain.encode_pk('1'));
 -- {R:eb8e4572...,R:eb0a852f...}
 ```
 
-O proof retorna hashes prefixados por direcao (`L` / `R`). Com proof + row_hash da pra recalcular o root.
+The proof returns hashes prefixed by direction (`L` / `R`). With proof + row_hash you can recompute the root.
 
-### Blocos
+### Blocks
 
-Entradas do `chain_log` sao seladas em blocos imutaveis. Cada bloco tem sua propria Merkle tree e `prev_block_hash` formando uma chain de segundo nivel.
+Entries from `chain_log` are sealed into immutable blocks. Each block has its own Merkle tree and `prev_block_hash`, forming a second-level chain.
 
 ```sql
--- Finaliza manualmente: agrupa entradas pendentes em um novo bloco
+-- Manually finalize: groups pending entries into a new block
 SELECT pgsigchain.finalize_block('ledger');
 -- 1   (block_number)
 
--- Lista todos os blocos
+-- List all blocks
 SELECT * FROM pgsigchain.block_info('ledger');
 ```
 
@@ -154,42 +156,42 @@ SELECT * FROM pgsigchain.block_info('ledger');
 | 1 | a1b2... | 0 | 3 | b76c... | 2026-04-26 ... |
 
 ```sql
--- Verifica que cada block_hash bate com merkle_root + prev_block_hash
+-- Verify each block_hash matches merkle_root + prev_block_hash
 SELECT pgsigchain.verify_blocks('ledger');
 ```
 
-Para finalizacao automatica, passe `auto_finalize` no `protect`:
+For automatic finalization, pass `auto_finalize` to `protect`:
 
 ```sql
 SELECT pgsigchain.protect('ledger', 'immutable', 100);
--- finaliza um bloco a cada 100 entradas
+-- finalizes a block every 100 entries
 ```
 
-### Assinaturas digitais (Ed25519)
+### Digital signatures (Ed25519)
 
-A chave privada **nunca e armazenada no banco**. O fluxo e operator-driven: a app gera o par, registra so a publica, e injeta a privada apenas no momento de assinar.
+The private key is **never stored in the database**. The flow is operator-driven: the app generates the keypair, registers only the public key, and injects the private key only at signing time.
 
 ```sql
--- 1. Gerar par (idealmente do lado do cliente)
+-- 1. Generate keypair (ideally on the client side)
 SELECT * FROM pgsigchain.generate_keypair();
 --  public_key                     | private_key
 -- --------------------------------+---------------------------------
 --  MCowBQYDK2VwAyEA...             | MC4CAQAwBQYDK2VwBCIEI...
 
--- 2. Registrar APENAS a publica para a tabela
+-- 2. Register ONLY the public key for the table
 SELECT pgsigchain.set_signing_key('ledger', 'MCowBQYDK2VwAyEA...');
 
 SELECT pgsigchain.get_public_key('ledger');
 
--- 3. Assinar uma entrada do chain_log (a privada vive so na chamada)
+-- 3. Sign a chain_log entry (the private key lives only inside the call)
 SELECT pgsigchain.sign_chain_entry('ledger', 1, 'MC4CAQAwBQYDK2VwBCIEI...');
 
--- 4. Verificar
+-- 4. Verify
 SELECT pgsigchain.verify_signature('ledger', 1);
 -- true
 ```
 
-O trigger de chain **nao assina automaticamente**. Assinatura e sempre uma acao explicita do operador. A assinatura cobre o `chain_hash` da entrada e e armazenada na coluna `signature` do `chain_log`.
+The chain trigger **does not sign automatically**. Signing is always an explicit operator action. The signature covers the entry's `chain_hash` and is stored in the `signature` column of `chain_log`.
 
 ### Status
 
@@ -201,22 +203,22 @@ SELECT * FROM pgsigchain.status();
 |---|---|---|---|---|---|
 | public | ledger | immutable | 2026-04-26 ... | 3 | 1 |
 
-### Quem fez (actor capture)
+### Who did it (actor capture)
 
-Cada entrada de `chain_log` registra automaticamente quem realizou a operação:
+Each `chain_log` entry automatically records who performed the operation:
 
-| Coluna | Origem |
+| Column | Source |
 |---|---|
 | `actor_user` | `current_user` |
 | `actor_app`  | `current_setting('application_name')` |
-| `actor_addr` | `inet_client_addr()` (NULL para conexões locais) |
+| `actor_addr` | `inet_client_addr()` (NULL for local connections) |
 | `actor_pid`  | `pg_backend_pid()` |
 
-Os 4 campos entram no `row_hash`, então alterar uma coluna de actor depois (via UPDATE direto em `pgsigchain.chain_log`) é detectável por `verify_data`.
+All four fields go into the `row_hash`, so changing an actor column afterwards (via direct UPDATE on `pgsigchain.chain_log`) is detectable by `verify_data`.
 
-### Manifesto pra ancoragem do conjunto
+### Manifest for set-level anchoring
 
-`pgsigchain.export_manifest()` retorna um JSONB com a lista completa de tabelas protegidas e suas chain heads atuais. Útil pra ancorar externamente o **conjunto** (não só blocos individuais), o que protege contra meta-tampering em `pgsigchain.protected_tables`:
+`pgsigchain.export_manifest()` returns a JSONB with the complete list of protected tables and their current chain heads. Useful for externally anchoring the **set** (not just individual blocks), which protects against meta-tampering on `pgsigchain.protected_tables`:
 
 ```sql
 SELECT pgsigchain.export_manifest();
@@ -237,192 +239,192 @@ SELECT pgsigchain.export_manifest();
 }
 ```
 
-### Desproteger
+### Unprotect
 
 ```sql
--- Recusa por padrao se houver dados de auditoria
+-- Refuses by default if there is audit data
 SELECT pgsigchain.unprotect('ledger');
 -- ERROR: pgsigchain: refusing to delete audit data; pass force => true
 
--- Forcar limpeza de chain_log + blocks + merkle_nodes + signing_keys
+-- Force cleanup of chain_log + blocks + merkle_nodes + signing_keys
 SELECT pgsigchain.unprotect('ledger', force => true);
 ```
 
-## Receitas
+## Recipes
 
-Cada exemplo mostra uma pergunta operacional e o fluxo SQL para responder.
+Each example shows an operational question and the SQL flow to answer it.
 
-### "Esse registro foi alterado sem passar pelo trigger?"
+### "Was this record changed without going through the trigger?"
 
-Suspeita: alguém fez `ALTER TABLE ... DISABLE TRIGGER`, alterou a row, e religou o trigger.
+Suspicion: someone ran `ALTER TABLE ... DISABLE TRIGGER`, modified the row, and re-enabled the trigger.
 
 ```sql
-SELECT pgsigchain.protect('contas');
--- ... operação normal por dias/meses ...
+SELECT pgsigchain.protect('accounts');
+-- ... normal operation for days/months ...
 
-SELECT pgsigchain.verify_data('contas');
--- t = todas as rows ainda batem com o hash do INSERT
--- f = alguma row foi mexida por trás do trigger
+SELECT pgsigchain.verify_data('accounts');
+-- t = every row still matches the INSERT hash
+-- f = some row was tampered with behind the trigger
 ```
 
-`verify_data` lê cada row da tabela viva, recomputa o hash com o mesmo encoding canônico, e compara com o `row_hash` mais recente em `chain_log`. Não importa por onde a alteração entrou — se mudou e o log não foi atualizado, dá `f`.
+`verify_data` reads each row from the live table, recomputes the hash with the same canonical encoding, and compares against the most recent `row_hash` in `chain_log`. It doesn't matter how the change came in — if it changed and the log wasn't updated, you get `f`.
 
-### "Quem registrou essa entrada?"
+### "Who recorded this entry?"
 
 ```sql
 SELECT operation, created_at,
        actor_user, actor_app, actor_addr, actor_pid
   FROM pgsigchain.chain_log
- WHERE table_oid = 'contas'::regclass
+ WHERE table_oid = 'accounts'::regclass
    AND row_pk = pgsigchain.encode_pk('1234')
  ORDER BY id;
 ```
 
-Cada INSERT/UPDATE/DELETE traz o `current_user`, o `application_name`, o IP do cliente e o pid do backend automaticamente.
+Every INSERT/UPDATE/DELETE carries `current_user`, `application_name`, client IP, and backend pid automatically.
 
-### "Alguém forjou a atribuição (mexeu no `actor_user` retroativamente)?"
+### "Did someone forge attribution (modify `actor_user` retroactively)?"
 
 ```sql
--- Atacante com SQL direto faz:
+-- Attacker with direct SQL does:
 UPDATE pgsigchain.chain_log SET actor_user = 'alice'
  WHERE id = 42;
 
--- Você roda:
-SELECT pgsigchain.verify_data('contas');
+-- You run:
+SELECT pgsigchain.verify_data('accounts');
 -- f
 ```
 
-Os 4 campos de actor entram no `row_hash`. Mexer em qualquer um deles depois quebra a verificação.
+The four actor fields go into `row_hash`. Tampering with any of them after the fact breaks verification.
 
-### "Como provo a um terceiro que esse registro existe e nunca mudou?"
+### "How do I prove to a third party that this record exists and never changed?"
 
 ```sql
--- 1. Sela um bloco
-SELECT pgsigchain.finalize_block('contas');  -- → block_number
+-- 1. Seal a block
+SELECT pgsigchain.finalize_block('accounts');  -- → block_number
 
--- 2. (uma vez) registra a chave pública pra terceiros conhecerem
-SELECT pgsigchain.set_signing_key('contas', '<pubkey hex>');
+-- 2. (once) register the public key so third parties know it
+SELECT pgsigchain.set_signing_key('accounts', '<pubkey hex>');
 
--- 3. Assina a entrada com a privkey (privkey só vive na chamada)
-SELECT pgsigchain.sign_chain_entry('contas', <chain_log_id>, '<privkey hex>');
+-- 3. Sign the entry with the privkey (privkey lives only in the call)
+SELECT pgsigchain.sign_chain_entry('accounts', <chain_log_id>, '<privkey hex>');
 
--- 4. Exporta o bloco e a Merkle proof do registro
-SELECT pgsigchain.export_block('contas', 1);
-SELECT pgsigchain.merkle_proof('contas', pgsigchain.encode_pk('1234'));
+-- 4. Export the block and the Merkle proof of the record
+SELECT pgsigchain.export_block('accounts', 1);
+SELECT pgsigchain.merkle_proof('accounts', pgsigchain.encode_pk('1234'));
 
--- 5. Ancora o bloco em algo imutável e guarda o ref
+-- 5. Anchor the block to something immutable and store the ref
 SELECT pgsigchain.record_anchor(
-    'contas', 1,
+    'accounts', 1,
     'opentimestamps', 'https://ots.example/proof/abc',
-    'commit do bloco 1'
+    'commit of block 1'
 );
 ```
 
-O terceiro verifica três coisas: (a) Merkle proof bate com o `merkle_root` do bloco, (b) bloco está assinado pela pubkey conhecida, (c) anchor externo aponta pro mesmo `block_hash`.
+The third party verifies three things: (a) the Merkle proof matches the block's `merkle_root`, (b) the block is signed by the known pubkey, (c) the external anchor points to the same `block_hash`.
 
-### "Detectei tampering — e agora?"
+### "I detected tampering — what now?"
 
-`verify_data` te diz **se** algo mudou. `find_tampered_rows` te diz **o que**:
+`verify_data` tells you **whether** something changed. `find_tampered_rows` tells you **what**:
 
 ```sql
-SELECT * FROM pgsigchain.find_tampered_rows('contas');
+SELECT * FROM pgsigchain.find_tampered_rows('accounts');
 --   row_pk    | chain_log_id | expected_hash | actual_hash | recorded_actor | recorded_at
 -- -----------+--------------+---------------+-------------+----------------+-------------
 --  04...0a   | 142          | 8f3a...        | bd11...      | alice          | 2026-04-12 ...
 --  04...0c   |              |                | (no chain_log entry — orphan row) |  |
 ```
 
-Cada row em conflito vira uma linha. Você vê:
+Each conflicting row becomes a line. You see:
 
-- `row_pk` — qual row está alterada (hex canônico; decode com a tabela viva pelo PK)
-- `expected_hash` vs `actual_hash` — confirma que mudou
-- `recorded_actor` + `recorded_at` — quem fez o último INSERT/UPDATE *legítimo* da row (não quem tampered — a alteração ilícita não passou por trigger, então não tem actor próprio)
-- `chain_log_id IS NULL` — row órfã (foi inserida bypassing trigger, ex: `DISABLE TRIGGER`)
+- `row_pk` — which row was altered (canonical hex; decode against the live table by PK)
+- `expected_hash` vs `actual_hash` — confirms it changed
+- `recorded_actor` + `recorded_at` — who performed the last *legitimate* INSERT/UPDATE on the row (not who tampered — the illicit change didn't go through the trigger, so it has no actor of its own)
+- `chain_log_id IS NULL` — orphan row (inserted bypassing the trigger, e.g., `DISABLE TRIGGER`)
 
-Fluxo forense típico:
+Typical forensic flow:
 
 ```sql
--- 1. Localiza
-SELECT * FROM pgsigchain.find_tampered_rows('contas');
+-- 1. Locate
+SELECT * FROM pgsigchain.find_tampered_rows('accounts');
 
--- 2. Compara com backup/replica pra ver o que mudou
---    (pgsigchain só guarda hash, não o valor original — o conteúdo histórico
---    tem que vir de fora)
+-- 2. Compare against backup/replica to see what changed
+--    (pgsigchain only stores the hash, not the original value — historical
+--    content has to come from outside)
 
--- 3. Confronta com auditoria de sessão do PG
---    (pg_audit, log_statement=all, pg_stat_activity, etc.) pra ver
---    qual sessão fez o ALTER TRIGGER + UPDATE no horário em questão.
+-- 3. Cross-reference against PG session audit
+--    (pg_audit, log_statement=all, pg_stat_activity, etc.) to see
+--    which session ran ALTER TRIGGER + UPDATE around the time in question.
 
--- 4. Se o tampering aconteceu APÓS um anchor externo, o anchor
---    invalidado prova que a reescrita ocorreu depois do commit:
-SELECT * FROM pgsigchain.audit_check('contas');
---   verify_data    | f       (rows alteradas)
---   verify_anchors | t/f     (se f, foi depois do anchor)
+-- 4. If tampering happened AFTER an external anchor, the invalidated
+--    anchor proves the rewrite occurred after the commit:
+SELECT * FROM pgsigchain.audit_check('accounts');
+--   verify_data    | f       (rows altered)
+--   verify_anchors | t/f     (if f, it happened after the anchor)
 ```
 
-**O que pgsigchain te dá:** *o que mudou* (rows e hashes), *desde quando o último estado válido era esse* (via anchor ou último `verify_data` de cron), *quem fez a versão legítima anterior* (actor original).
+**What pgsigchain gives you:** *what changed* (rows and hashes), *since when the last valid state held* (via anchor or last `verify_data` from cron), *who made the previous legitimate version* (original actor).
 
-**O que pgsigchain NÃO te dá:** *o conteúdo anterior* (só o hash), *quem fez o tamper* (a alteração ilícita não passou pelo trigger), *o exato momento do tamper* (só "entre meu último anchor e agora"). Pra essas três você precisa de backups/replicas + audit log do Postgres + monitoramento periódico.
+**What pgsigchain does NOT give you:** *the previous content* (only the hash), *who did the tampering* (the illicit change didn't go through the trigger), *the exact moment of tampering* (only "between my last anchor and now"). For those three you need backups/replicas + Postgres audit log + periodic monitoring.
 
-### "A chain inteira foi reescrita pelo DBA — eu noto?"
+### "The whole chain was rewritten by a DBA — would I notice?"
 
-Cenário pior: superuser tem acesso completo e refaz `pgsigchain.chain_log` do zero.
+Worst case: a superuser has full access and rebuilds `pgsigchain.chain_log` from scratch.
 
 ```sql
--- Antes (em ponto controlado): ancora externamente
-SELECT pgsigchain.finalize_block('contas');
+-- Beforehand (at a controlled checkpoint): anchor externally
+SELECT pgsigchain.finalize_block('accounts');
 SELECT pgsigchain.record_anchor(
-    'contas', 1,
+    'accounts', 1,
     's3-versionid', 's3://audit/manifest.json#v=abc',
     NULL
 );
 
--- Mais tarde, audita:
-SELECT * FROM pgsigchain.audit_check('contas');
+-- Later, audit:
+SELECT * FROM pgsigchain.audit_check('accounts');
 --    check_name    | passed
 -- -----------------+--------
---  verify_chain    | t       (chain reescrita ainda é internamente consistente)
---  verify_data     | t       (dados batem com a chain reescrita)
---  verify_blocks   | f       (block_hash recomputado não bate com o gravado)
---  verify_anchors  | f       (anchor externo aponta pra hash diferente)
+--  verify_chain    | t       (rewritten chain is still internally consistent)
+--  verify_data     | t       (data matches the rewritten chain)
+--  verify_blocks   | f       (recomputed block_hash doesn't match the stored one)
+--  verify_anchors  | f       (external anchor points to a different hash)
 ```
 
-Sem anchors externos, reescrita silenciosa é indetectável dentro do DB. Com anchors, qualquer mexida no bloco invalida o anchor — e como o anchor está fora do banco, o atacante não consegue alterar.
+Without external anchors, silent rewrites are undetectable inside the DB. With anchors, any tampering with the block invalidates the anchor — and since the anchor lives outside the database, the attacker can't change it.
 
-### "Tentaram apagar tudo com `TRUNCATE`?"
+### "Did someone try to wipe everything with `TRUNCATE`?"
 
 ```sql
-TRUNCATE contas;
--- ERROR: pgsigchain: TRUNCATE not allowed on protected table "contas"
+TRUNCATE accounts;
+-- ERROR: pgsigchain: TRUNCATE not allowed on protected table "accounts"
 ```
 
-Trigger `BEFORE TRUNCATE` aborta. Sem isso, TRUNCATE passaria por baixo dos triggers per-row e `verify_data` retornaria `t` enganosamente (zero rows = zero mismatches).
+A `BEFORE TRUNCATE` trigger aborts. Without it, TRUNCATE would slip past the per-row triggers and `verify_data` would misleadingly return `t` (zero rows = zero mismatches).
 
-### "Tem um sistema gravando dados — como monitoro em produção?"
+### "There's a system writing data — how do I monitor it in production?"
 
-pgsigchain é **pull-based**: nada notifica sozinho. Alguém — cron, app, scheduler interno — precisa chamar `verify_*` periodicamente. Os helpers para isso são:
+pgsigchain is **pull-based**: nothing notifies on its own. Someone — cron, app, internal scheduler — has to call `verify_*` periodically. The helpers for this are:
 
 ```sql
--- Roda audit_check em TODAS as tabelas protegidas
+-- Run audit_check on ALL protected tables
 SELECT * FROM pgsigchain.check_all();
 --    table_name    |   check_name   | passed |       details
 -- -----------------+----------------+--------+---------------------
---  public.contas   | verify_chain   | t      |
---  public.contas   | verify_data    | t      |
---  public.contas   | verify_blocks  | t      | 3 block(s)
---  public.contas   | verify_anchors | t      | 2 anchor(s), 0 invalid
---  public.eventos  | verify_chain   | t      |
+--  public.accounts | verify_chain   | t      |
+--  public.accounts | verify_data    | t      |
+--  public.accounts | verify_blocks  | t      | 3 block(s)
+--  public.accounts | verify_anchors | t      | 2 anchor(s), 0 invalid
+--  public.events   | verify_chain   | t      |
 --  ...
 
--- Mesma coisa, mas: retorna false se algo falhou e dispara NOTIFY com payload JSON
+-- Same thing, but: returns false if anything failed and emits NOTIFY with JSON payload
 SELECT pgsigchain.check_all_and_notify('pgsigchain_alert');
--- false  → o NOTIFY 'pgsigchain_alert' carrega {"detected_at":"...","failures":[...]}
--- true   → tudo limpo, nenhum NOTIFY enviado
+-- false  → the NOTIFY 'pgsigchain_alert' carries {"detected_at":"...","failures":[...]}
+-- true   → all clean, no NOTIFY sent
 ```
 
-Três jeitos comuns de wirar isso em produção:
+Three common ways to wire this in production:
 
-#### 1. Cron externo + alertas (mais simples)
+#### 1. External cron + alerts (simplest)
 
 `/etc/cron.d/pgsigchain-monitor`:
 
@@ -431,18 +433,18 @@ Três jeitos comuns de wirar isso em produção:
     | grep -q t && curl -X POST -d "pgsigchain tampering detected" $SLACK_WEBHOOK_URL
 ```
 
-A cada minuto roda `check_all_and_notify`. Se voltar `t` (= teve falha), dispara webhook do Slack/PagerDuty. Simples, sem dependência extra.
+Every minute runs `check_all_and_notify`. If it returns `t` (= a check failed), it fires a Slack/PagerDuty webhook. Simple, no extra dependencies.
 
-#### 2. pg_cron + LISTEN dentro da aplicação
+#### 2. pg_cron + LISTEN inside the app
 
-Schedule no Postgres (`pg_cron`):
+Schedule inside Postgres (`pg_cron`):
 
 ```sql
 SELECT cron.schedule('pgsigchain-monitor', '* * * * *',
     $$SELECT pgsigchain.check_all_and_notify('pgsigchain_alert')$$);
 ```
 
-Listener Node.js (qualquer driver com pub/sub Postgres serve):
+Node.js listener (any Postgres driver with pub/sub works):
 
 ```js
 const client = new pg.Client(...);
@@ -454,11 +456,11 @@ client.on('notification', msg => {
 });
 ```
 
-Cron *dentro* do banco, alertas via canal nativo, latência sub-segundo entre detecção e alerta.
+Cron *inside* the database, alerts via the native channel, sub-second latency between detection and alert.
 
-#### 3. Sidecar / app-side (para verificações pontuais)
+#### 3. Sidecar / app-side (for ad-hoc checks)
 
-Se a aplicação já tem rotas administrativas, expose um endpoint que chama `check_all`:
+If the application already has admin routes, expose an endpoint that calls `check_all`:
 
 ```python
 @app.route('/admin/integrity')
@@ -468,87 +470,87 @@ def integrity():
     return {'ok': not failures, 'failures': failures}, 503 if failures else 200
 ```
 
-Plug isso num healthcheck do Kubernetes/load balancer, no dashboard interno, ou num runbook do oncall.
+Plug it into a Kubernetes/load balancer healthcheck, an internal dashboard, or an oncall runbook.
 
-#### Quando rodar
+#### When to run
 
-Não tem regra única — depende do volume e da criticidade. Padrões comuns:
+There's no single rule — depends on volume and criticality. Common patterns:
 
-- **A cada minuto** — sistemas financeiros / compliance estrito. `verify_data` em tabela com 100k rows demora ~1s; em 10M rows pode passar de 10s. Combine com `verify_chain` (rápido, só lê o log) na frequência alta + `verify_data` (caro, escaneia a tabela) numa frequência menor.
-- **A cada hora** — auditoria normal. Suficiente para detectar tampering antes do próximo ciclo de backup.
-- **A cada deploy / mudança de schema** — gate no pipeline: se `check_all` falhar, bloqueia o deploy.
-- **Antes/depois de cada anchor externo** — garante que o que você está ancorando ainda está íntegro.
+- **Every minute** — financial systems / strict compliance. `verify_data` on a 100k-row table takes ~1s; on 10M rows it can exceed 10s. Combine `verify_chain` (fast, only reads the log) at high frequency with `verify_data` (expensive, scans the table) at lower frequency.
+- **Hourly** — normal auditing. Sufficient to detect tampering before the next backup cycle.
+- **At every deploy / schema change** — gate it in the pipeline: if `check_all` fails, block the deploy.
+- **Before/after every external anchor** — guarantees that what you're anchoring is still intact.
 
-#### Custo de cada check
+#### Cost of each check
 
-| Check | Custo aproximado | Quando rodar com mais frequência |
+| Check | Approximate cost | Run frequently? |
 |---|---|---|
-| `verify_chain` | O(N) sequencial no `chain_log` da tabela; rápido (cabe em segundos pra milhões de entradas) | Sim, é leve |
-| `verify_data` | O(M) varredura da tabela viva + 1 lookup em `chain_log` por row | Não — caro em tabelas grandes |
-| `verify_blocks` | O(B) linhas em `pgsigchain.blocks`; muito rápido | Sim |
-| `verify_anchor` | O(1) por anchor | Sim, é trivial |
+| `verify_chain` | O(N) sequential over the table's `chain_log`; fast (fits in seconds for millions of entries) | Yes, it's light |
+| `verify_data` | O(M) scan of the live table + 1 lookup in `chain_log` per row | No — expensive on large tables |
+| `verify_blocks` | O(B) rows in `pgsigchain.blocks`; very fast | Yes |
+| `verify_anchor` | O(1) per anchor | Yes, trivial |
 
-Estratégia comum: `verify_chain` + `verify_blocks` + `verify_anchors` a cada minuto; `verify_data` a cada hora ou a cada anchor; `find_tampered_rows` só sob demanda quando algo já falhou.
+Common strategy: `verify_chain` + `verify_blocks` + `verify_anchors` every minute; `verify_data` hourly or per anchor; `find_tampered_rows` only on demand once something has failed.
 
-### "Que tabelas estão protegidas e em que estado?"
+### "Which tables are protected and in what state?"
 
 ```sql
--- Visão rápida:
+-- Quick view:
 SELECT * FROM pgsigchain.status();
 
--- Snapshot portátil pra ancorar o conjunto inteiro:
+-- Portable snapshot for anchoring the whole set:
 SELECT pgsigchain.export_manifest();
 ```
 
-`export_manifest()` retorna um JSONB com cada tabela protegida + última `chain_hash`, `block_hash` e pubkey. Ancorar esse JSON externamente protege contra meta-tampering em `pgsigchain.protected_tables`.
+`export_manifest()` returns a JSONB with each protected table + last `chain_hash`, `block_hash`, and pubkey. Anchoring this JSON externally protects against meta-tampering on `pgsigchain.protected_tables`.
 
-## Referencia da API
+## API reference
 
-| Funcao | Retorno | Descricao |
+| Function | Returns | Description |
 |---|---|---|
-| `pgsigchain.protect(table_name, mode, auto_finalize)` | void | Protege uma tabela. `mode`: `immutable`/`audit`. `auto_finalize`: N entradas por bloco. |
-| `pgsigchain.unprotect(table_name, force)` | void | Remove protecao. Recusa apagar audit data sem `force => true`. |
-| `pgsigchain.sha256(data bytea)` | text | SHA-256 de dados arbitrarios |
-| `pgsigchain.encode_pk(VARIADIC parts text[])` | text | Encoding canonico length-prefixed da PK (hex) |
-| `pgsigchain.verify_chain(table_name)` | boolean | Valida toda a hash chain |
-| `pgsigchain.verify_row(table_name, row_pk)` | boolean | Valida uma row do chain_log (use `encode_pk` na PK) |
-| `pgsigchain.verify_data(table_name)` | boolean | Compara estado atual da tabela vs ultimo hash registrado |
-| `pgsigchain.find_tampered_rows(table_name)` | setof record | Lista as rows alteradas + hash esperado/atual + actor original |
-| `pgsigchain.build_merkle(table_name)` | text | Constroi Merkle tree, retorna root |
-| `pgsigchain.merkle_root(table_name)` | text | Retorna root hash armazenado |
-| `pgsigchain.merkle_proof(table_name, row_pk)` | text[] | Merkle proof da row (use `encode_pk`) |
-| `pgsigchain.finalize_block(table_name)` | bigint | Sela entradas pendentes num novo bloco; retorna block_number |
-| `pgsigchain.block_info(table_name)` | setof record | Lista blocos (number, hash, prev_hash, entries, merkle_root, created_at) |
-| `pgsigchain.verify_blocks(table_name)` | boolean | Verifica integridade da chain de blocos |
-| `pgsigchain.generate_keypair()` | (text, text) | Gera par Ed25519 `(public_key, private_key)` |
-| `pgsigchain.set_signing_key(table_name, public_key)` | void | Registra a chave publica da tabela |
-| `pgsigchain.get_public_key(table_name)` | text | Retorna a chave publica registrada |
-| `pgsigchain.sign_chain_entry(table_name, chain_log_id, private_key)` | void | Assina uma entrada (privada nao e persistida) |
-| `pgsigchain.verify_signature(table_name, chain_log_id)` | boolean | Verifica assinatura de uma entrada |
-| `pgsigchain.status()` | setof record | Lista tabelas protegidas com chain_length e block_count |
-| `pgsigchain.export_manifest()` | jsonb | Snapshot portátil do conjunto protegido (pra ancorar externamente) |
-| `pgsigchain.audit_check(table_name)` | setof record | Roda verify_chain + verify_data + verify_blocks + verify_anchor |
-| `pgsigchain.check_all()` | setof record | `audit_check` em todas as tabelas protegidas |
-| `pgsigchain.check_all_and_notify(channel)` | boolean | Roda check_all; se houver falha, dispara `pg_notify(channel, json)` e retorna false |
-| `pgsigchain.export_block(table_name, block_number)` | jsonb | Exporta um bloco em JSON pra ancoragem externa |
-| `pgsigchain.record_anchor(table, block_number, type, ref, notes)` | bigint | Registra ponteiro pra evidência off-DB |
-| `pgsigchain.verify_anchor(anchor_id)` | boolean | Confirma que o bloco ainda bate com o anchor |
-| `pgsigchain.anchor_status(table_name)` | setof record | Por bloco: anchor_count, all_valid, last_anchored |
+| `pgsigchain.protect(table_name, mode, auto_finalize)` | void | Protect a table. `mode`: `immutable`/`audit`. `auto_finalize`: N entries per block. |
+| `pgsigchain.unprotect(table_name, force)` | void | Remove protection. Refuses to delete audit data without `force => true`. |
+| `pgsigchain.sha256(data bytea)` | text | SHA-256 of arbitrary data |
+| `pgsigchain.encode_pk(VARIADIC parts text[])` | text | Length-prefixed canonical encoding of the PK (hex) |
+| `pgsigchain.verify_chain(table_name)` | boolean | Validates the entire hash chain |
+| `pgsigchain.verify_row(table_name, row_pk)` | boolean | Validates one row from chain_log (use `encode_pk` on the PK) |
+| `pgsigchain.verify_data(table_name)` | boolean | Compares the table's current state vs the last recorded hash |
+| `pgsigchain.find_tampered_rows(table_name)` | setof record | Lists altered rows + expected/actual hash + original actor |
+| `pgsigchain.build_merkle(table_name)` | text | Builds the Merkle tree, returns root |
+| `pgsigchain.merkle_root(table_name)` | text | Returns stored root hash |
+| `pgsigchain.merkle_proof(table_name, row_pk)` | text[] | Merkle proof for the row (use `encode_pk`) |
+| `pgsigchain.finalize_block(table_name)` | bigint | Seals pending entries into a new block; returns block_number |
+| `pgsigchain.block_info(table_name)` | setof record | Lists blocks (number, hash, prev_hash, entries, merkle_root, created_at) |
+| `pgsigchain.verify_blocks(table_name)` | boolean | Verifies the integrity of the block chain |
+| `pgsigchain.generate_keypair()` | (text, text) | Generates Ed25519 pair `(public_key, private_key)` |
+| `pgsigchain.set_signing_key(table_name, public_key)` | void | Registers the table's public key |
+| `pgsigchain.get_public_key(table_name)` | text | Returns the registered public key |
+| `pgsigchain.sign_chain_entry(table_name, chain_log_id, private_key)` | void | Signs an entry (private key is not persisted) |
+| `pgsigchain.verify_signature(table_name, chain_log_id)` | boolean | Verifies the signature of an entry |
+| `pgsigchain.status()` | setof record | Lists protected tables with chain_length and block_count |
+| `pgsigchain.export_manifest()` | jsonb | Portable snapshot of the protected set (for external anchoring) |
+| `pgsigchain.audit_check(table_name)` | setof record | Runs verify_chain + verify_data + verify_blocks + verify_anchor |
+| `pgsigchain.check_all()` | setof record | `audit_check` over every protected table |
+| `pgsigchain.check_all_and_notify(channel)` | boolean | Runs check_all; if anything fails, fires `pg_notify(channel, json)` and returns false |
+| `pgsigchain.export_block(table_name, block_number)` | jsonb | Exports a block as JSON for external anchoring |
+| `pgsigchain.record_anchor(table, block_number, type, ref, notes)` | bigint | Records a pointer to off-DB evidence |
+| `pgsigchain.verify_anchor(anchor_id)` | boolean | Confirms the block still matches the anchor |
+| `pgsigchain.anchor_status(table_name)` | setof record | Per block: anchor_count, all_valid, last_anchored |
 
-## Tabelas internas
+## Internal tables
 
-Todas no schema `pgsigchain`. Marcadas com `pg_extension_config_dump`, entao `pg_dump` preserva o conteudo.
+All in the `pgsigchain` schema. Marked with `pg_extension_config_dump`, so `pg_dump` preserves the contents.
 
-- **`pgsigchain.protected_tables`** — registro de tabelas (oid, schema, nome, mode, auto_finalize_threshold)
-- **`pgsigchain.chain_log`** — log encadeado (row_pk, row_hash, prev_hash, chain_hash, operation, new_row_hash, block_id, signature, actor_user, actor_app, actor_addr, actor_pid)
-- **`pgsigchain.blocks`** — blocos finalizados (block_number, prev_block_hash, block_hash, entries_count, merkle_root)
-- **`pgsigchain.merkle_nodes`** — nos das Merkle trees por bloco (level, position, hash, left_child, right_child, block_id)
-- **`pgsigchain.signing_keys`** — chave publica por tabela (Ed25519). Privadas nunca sao armazenadas.
-- **`pgsigchain.anchors`** — registros de ancoragem externa (block_id, anchor_type, anchor_ref, block_hash_at_anchor, notes)
+- **`pgsigchain.protected_tables`** — table registry (oid, schema, name, mode, auto_finalize_threshold)
+- **`pgsigchain.chain_log`** — chained log (row_pk, row_hash, prev_hash, chain_hash, operation, new_row_hash, block_id, signature, actor_user, actor_app, actor_addr, actor_pid)
+- **`pgsigchain.blocks`** — finalized blocks (block_number, prev_block_hash, block_hash, entries_count, merkle_root)
+- **`pgsigchain.merkle_nodes`** — Merkle tree nodes per block (level, position, hash, left_child, right_child, block_id)
+- **`pgsigchain.signing_keys`** — public key per table (Ed25519). Private keys are never stored.
+- **`pgsigchain.anchors`** — external anchoring records (block_id, anchor_type, anchor_ref, block_hash_at_anchor, notes)
 
-`TRUNCATE` numa tabela protegida é bloqueado nos dois modes — sem isso, seria um bypass silencioso (apagaria todas as rows sem touch em `chain_log`).
+`TRUNCATE` on a protected table is blocked in both modes — without that, it would be a silent bypass (deleting all rows without touching `chain_log`).
 
-## Como funciona
+## How it works
 
 ```
 INSERT/UPDATE/DELETE row
@@ -558,13 +560,13 @@ INSERT/UPDATE/DELETE row
     |
     +---> row_pk = encode_pk(pk1, pk2, ...)         (length-prefixed, hex)
     +---> row_hash = SHA-256(canonical(col1,...,colN))  (length-prefixed)
-    +---> prev_hash = chain_hash da ultima entrada (ou "0")
+    +---> prev_hash = chain_hash of the last entry (or "0")
     +---> chain_hash = SHA-256(prev_hash || row_hash)
     +---> INSERT INTO pgsigchain.chain_log
-    +---> se auto_finalize atingido -> finalize_block()
+    +---> if auto_finalize threshold reached -> finalize_block()
 
 
-UPDATE/DELETE em modo immutable
+UPDATE/DELETE in immutable mode
     |
     v
 [immutable_trigger]  ->  ERROR: not allowed
@@ -573,30 +575,30 @@ UPDATE/DELETE em modo immutable
 finalize_block
     |
     v
-entradas pendentes -> Merkle tree -> merkle_root
+pending entries -> Merkle tree -> merkle_root
     |
     +---> block_hash = SHA-256(prev_block_hash || merkle_root || entries_count)
     +---> INSERT INTO pgsigchain.blocks
-    +---> chain_log.block_id = novo bloco
+    +---> chain_log.block_id = new block
 ```
 
-O encoding canonico length-prefixed (`len(c1)||c1||len(c2)||c2||...`) elimina ambiguidades de concatenacao simples (ex.: `"ab"+"c"` vs `"a"+"bc"`), evitando colisoes de hash entre rows distintas.
+The length-prefixed canonical encoding (`len(c1)||c1||len(c2)||c2||...`) eliminates ambiguities of plain concatenation (e.g., `"ab"+"c"` vs `"a"+"bc"`), preventing hash collisions between distinct rows.
 
-## Estrutura do projeto
+## Project layout
 
 ```
 pgsigchain/
-├── Makefile              # Build PGXS
-├── pgsigchain.control          # Metadata da extensao
-├── Dockerfile            # Build em container
+├── Makefile              # PGXS build
+├── pgsigchain.control    # Extension metadata
+├── Dockerfile            # Container build
 ├── docker-compose.yml
 ├── sql/
-│   └── pgsigchain--0.3.0.sql   # Schema e declaracao das funcoes
+│   └── pgsigchain--0.3.0.sql   # Schema and function declarations
 ├── src/
-│   ├── pgsigchain.c            # Entry point
+│   ├── pgsigchain.c      # Entry point
 │   ├── hash.c            # SHA-256 (OpenSSL EVP)
 │   ├── chain.c           # Chain trigger (immutable + audit)
-│   ├── immutable.c       # Bloqueia UPDATE/DELETE
+│   ├── immutable.c       # Blocks UPDATE/DELETE
 │   ├── merkle.c          # Merkle tree
 │   ├── blocks.c          # finalize_block, block_info, verify_blocks
 │   ├── sign.c            # Ed25519 keypair, sign, verify
@@ -606,6 +608,6 @@ pgsigchain/
 └── test/                 # Regression tests
 ```
 
-## Licenca
+## License
 
-PostgreSQL License — ver [`LICENSE`](LICENSE).
+PostgreSQL License — see [`LICENSE`](LICENSE).
