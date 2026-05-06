@@ -608,4 +608,4 @@ pgsigchain/
 
 ## Licenca
 
-MIT
+PostgreSQL License — ver [`LICENSE`](LICENSE).
